@@ -1,0 +1,135 @@
+# Alpamayo-R1 SFT Training Configuration for RLinf Framework
+
+# Algorithm configuration
+algorithm:
+  name: "alpamayo_sft"
+  loss_type: "embodied_sft"
+
+# Actor (model) configuration
+actor:
+  group_name: "alpamayo_actor"
+  model:
+    # Model configuration
+    model_type: "alpamayo"
+    model_path: "nvidia/Alpamayo-R1-10B"
+    base_model_name: "Qwen/Qwen3-VL-2B-Instruct"
+    
+    # Precision
+    dtype: "bfloat16"
+    
+    # Attention
+    attn_implementation: "flash_attention_2"  # flash_attention_2, sdpa, eager
+    
+    # Generation parameters
+    max_generation_length: 256
+    num_traj_samples: 1
+    temperature: 0.6
+    top_p: 0.98
+    
+    # Trajectory parameters
+    num_history_steps: 16  # 1.6s @ 10Hz
+    num_future_steps: 64   # 6.4s @ 10Hz
+    time_step: 0.1
+    num_frames: 4
+    
+    # Action space
+    action_dim: 9  # 3 (xyz) + 6 (6D rotation)
+    diffusion_steps: 10
+    
+    # LoRA (optional)
+    use_lora: false
+    lora_path: null
+  
+  # FSDP configuration
+  fsdp:
+    enabled: true
+    sharding_strategy: "FULL_SHARD"
+    cpu_offload: false
+    activation_checkpointing: true
+  
+  # Optimizer
+  optimizer:
+    type: "adamw"
+    lr: 1.0e-5
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.95
+  
+  # Learning rate schedule
+  lr_scheduler:
+    type: "cosine"
+    warmup_steps: 100
+    total_steps: 10000
+
+# Rollout configuration
+rollout:
+  group_name: "alpamayo_rollout"
+  model:
+    model_path: "${actor.model.model_path}"
+    dtype: "${actor.model.dtype}"
+  temperature: 0.6
+  top_p: 0.98
+
+# Environment/Data configuration
+env:
+  group_name: "alpamayo_env"
+  
+  # Dataset configuration
+  dataset:
+    name: "physical_ai_av"
+    data_root: null  # Update to your local path or HuggingFace dataset
+    
+    # Data loading
+    num_history_steps: ${actor.model.num_history_steps}
+    num_future_steps: ${actor.model.num_future_steps}
+    time_step: ${actor.model.time_step}
+    num_frames: ${actor.model.num_frames}
+    
+    # Cameras
+    cameras:
+      - "CAMERA_CROSS_LEFT_120FOV"
+      - "CAMERA_FRONT_WIDE_120FOV"
+      - "CAMERA_CROSS_RIGHT_120FOV"
+      - "CAMERA_FRONT_TELE_30FOV"
+  
+  batch_size: 4
+  num_workers: 4
+
+# Training configuration
+training:
+  total_steps: 10000
+  batch_size: ${env.batch_size}
+  grad_accum_steps: 1
+  
+  # Loss weights
+  trajectory_loss_weight: 1.0
+  cot_loss_weight: 0.1
+  
+  # Mixed precision
+  use_amp: true
+  amp_dtype: "bfloat16"
+  
+  # Gradient clipping
+  grad_clip: 1.0
+  
+  # Logging
+  log_interval: 10
+  save_interval: 1000
+  eval_interval: 500
+  
+  save_dir: "./logs/alpamayo_sft"
+
+# Cluster configuration
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: "0"  # Use "0-3" for 4 GPUs
+
+# Runner configuration
+runner:
+  per_worker_log_path: "./logs/alpamayo_sft/workers"
+
+# WandB logging (optional)
+wandb:
+  enabled: false
+  project: "alpamayo_rlinf"
