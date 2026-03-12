@@ -1,0 +1,59 @@
+# Alpamayo-R1 Model Configuration for RLinf
+
+model_type: "alpamayo"
+implement_version: "rlinf"
+
+# Model path
+model_path: "nvidia/Alpamayo-R1-10B"
+base_model_name: "Qwen/Qwen3-VL-2B-Instruct"
+
+# Precision
+dtype: "bfloat16"
+precision: "bf16"
+
+# Attention implementation
+# Options: "flash_attention_2", "sdpa", "eager"
+attn_implementation: "flash_attention_2"
+
+# Generation parameters
+max_generation_length: 256
+num_traj_samples: 1
+temperature: 0.6
+top_p: 0.98
+
+# Trajectory parameters
+num_history_steps: 16  # 1.6s @ 10Hz
+num_future_steps: 64   # 6.4s @ 10Hz
+time_step: 0.1         # 10Hz frequency
+num_frames: 4          # Number of camera frames
+
+# Camera configuration
+cameras:
+  - "CAMERA_CROSS_LEFT_120FOV"
+  - "CAMERA_FRONT_WIDE_120FOV"
+  - "CAMERA_CROSS_RIGHT_120FOV"
+  - "CAMERA_FRONT_TELE_30FOV"
+
+# Action space
+action_dim: 9  # 3 (xyz) + 6 (6D rotation)
+
+# Diffusion parameters
+diffusion_steps: 10
+diffusion_hidden_dim: 512
+diffusion_num_layers: 4
+
+# Value head (for RL)
+add_value_head: false
+value_after_vlm: false
+
+# LoRA (optional, for memory efficiency)
+use_lora: false
+lora_path: null
+lora_rank: 32
+
+# Performance
+low_cpu_mem_usage: true
+trust_remote_code: true
+
+# Dataset statistics (for action normalization)
+unnorm_key: "physical_ai_av"
