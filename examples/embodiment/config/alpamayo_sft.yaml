@@ -1,24 +1,57 @@
 # Alpamayo-R1 SFT Training Configuration for RLinf Framework
+# Updated: 2026-03-13
 
-# Algorithm configuration
+defaults:
+  - env/physical_ai_av@env
+  - model/alpamayo@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: "0"  # Use "0-3" for 4 GPUs
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "alpamayo_sft"
+    logger_backends: ["tensorboard"] # wandb, swanlab
+
+  max_epochs: 1000
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 50
+
+  resume_dir: null # Optional: path to a saved checkpoint directory
+  ckpt_path: null  # Optional: path to a .pt checkpoint for evaluation
+
 algorithm:
-  name: "alpamayo_sft"
   loss_type: "embodied_sft"
 
-# Actor (model) configuration
 actor:
-  group_name: "alpamayo_actor"
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 4
+  global_batch_size: 32
+  seed: 42
+  enable_offload: False
+
+  # Override the default values in model/alpamayo
   model:
-    # Model configuration
-    model_type: "alpamayo"
     model_path: "nvidia/Alpamayo-R1-10B"
-    base_model_name: "Qwen/Qwen3-VL-2B-Instruct"
-    
-    # Precision
-    dtype: "bfloat16"
-    
-    # Attention
-    attn_implementation: "flash_attention_2"  # flash_attention_2, sdpa, eager
+    model_type: "alpamayo"
     
     # Generation parameters
     max_generation_length: 256
@@ -36,69 +69,101 @@ actor:
     action_dim: 9  # 3 (xyz) + 6 (6D rotation)
     diffusion_steps: 10
     
+    # Precision
+    dtype: "bfloat16"
+    precision: "bf16"
+    
+    # Attention
+    attn_implementation: "flash_attention_2"  # flash_attention_2, sdpa, eager
+    
     # LoRA (optional)
     use_lora: false
     lora_path: null
-  
-  # FSDP configuration
-  fsdp:
-    enabled: true
-    sharding_strategy: "FULL_SHARD"
-    cpu_offload: false
-    activation_checkpointing: true
+    lora_rank: 32
+    
+    # Value head (not needed for SFT)
+    add_value_head: false
+    value_after_vlm: false
   
   # Optimizer
-  optimizer:
-    type: "adamw"
+  optim:
     lr: 1.0e-5
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
     weight_decay: 0.01
-    beta1: 0.9
-    beta2: 0.95
+    clip_grad: 1.0
   
-  # Learning rate schedule
-  lr_scheduler:
-    type: "cosine"
-    warmup_steps: 100
-    total_steps: 10000
+  # Override the default values in training_backend/fsdp
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: True
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
 
-# Rollout configuration
-rollout:
-  group_name: "alpamayo_rollout"
-  model:
-    model_path: "${actor.model.model_path}"
-    dtype: "${actor.model.dtype}"
-  temperature: 0.6
-  top_p: 0.98
-
-# Environment/Data configuration
 env:
-  group_name: "alpamayo_env"
+  group_name: "EnvGroup"
+
+  # Override the default values in env/physical_ai_av
+  total_num_envs: 32
+  group_size: 1
+  max_episode_steps: 64
+  max_steps_per_rollout_epoch: 64
+  auto_reset: True
+  ignore_terminations: False
   
   # Dataset configuration
   dataset:
     name: "physical_ai_av"
     data_root: null  # Update to your local path or HuggingFace dataset
     
-    # Data loading
-    num_history_steps: ${actor.model.num_history_steps}
-    num_future_steps: ${actor.model.num_future_steps}
-    time_step: ${actor.model.time_step}
-    num_frames: ${actor.model.num_frames}
-    
-    # Cameras
+    # Camera configuration
     cameras:
       - "CAMERA_CROSS_LEFT_120FOV"
       - "CAMERA_FRONT_WIDE_120FOV"
       - "CAMERA_CROSS_RIGHT_120FOV"
       - "CAMERA_FRONT_TELE_30FOV"
+    
+    # Data loading parameters
+    num_history_steps: ${actor.model.num_history_steps}
+    num_future_steps: ${actor.model.num_future_steps}
+    time_step: ${actor.model.time_step}
+    
+    # Action normalization
+    unnorm_key: "physical_ai_av"
   
-  batch_size: 4
-  num_workers: 4
+  # Video recording
+  video_cfg:
+    save_video: False
+    info_on_video: True
+    video_base_dir: ${runner.logger.log_path}/video
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  unnorm_key: physical_ai_av
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False
 
 # Training configuration
 training:
   total_steps: 10000
-  batch_size: ${env.batch_size}
+  batch_size: ${env.total_num_envs}
   grad_accum_steps: 1
   
   # Loss weights
@@ -106,7 +171,7 @@ training:
   cot_loss_weight: 0.1
   
   # Mixed precision
-  use_amp: true
+  use_amp: True
   amp_dtype: "bfloat16"
   
   # Gradient clipping
@@ -114,20 +179,10 @@ training:
   
   # Logging
   log_interval: 10
-  save_interval: 1000
+  save_interval: 50
   eval_interval: 500
   
   save_dir: "./logs/alpamayo_sft"
-
-# Cluster configuration
-cluster:
-  num_nodes: 1
-  component_placement:
-    actor,env,rollout: "0"  # Use "0-3" for 4 GPUs
-
-# Runner configuration
-runner:
-  per_worker_log_path: "./logs/alpamayo_sft/workers"
 
 # WandB logging (optional)
 wandb:

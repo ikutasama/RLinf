@@ -1,0 +1,192 @@
+defaults:
+  - env/physical_ai_av@env
+  - model/alpamayo@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+# GPU IDs - set via command line or environment variable
+# Usage: bash run_alpamayo_grpo.sh 0-3
+gpu_ids: "0"
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: ${gpu_ids}
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "alpamayo_grpo"
+    logger_backends: ["tensorboard"] # wandb, swanlab
+
+  max_epochs: 1000
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 50
+
+  resume_dir: null # Optional: path to a saved checkpoint directory
+  ckpt_path: null  # Optional: path to a .pt checkpoint for evaluation
+
+algorithm:
+  normalize_advantages: True
+  kl_penalty: kl  # how to estimate kl divergence: kl or kl_penalty
+  group_size: 8
+  
+  rollout_epoch: 4
+  eval_rollout_epoch: 1 # set eval_rollout_epoch > 0 when enable runner.only_eval or runner.val_check_interval > 0
+
+  reward_type: trajectory_level  # trajectory_level or action_level
+  logprob_type: token_level
+  entropy_type: token_level
+
+  adv_type: grpo
+  loss_type: actor
+  loss_agg_func: "token-mean"
+  kl_beta: 0.001
+  entropy_bonus: 0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  # Filter rewards to avoid outliers
+  filter_rewards: True
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+
+  # params for generation
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 0.98
+    repetition_penalty: 1.0
+    add_BOS: False
+
+  # length argument for autoregressive sampling
+  length_params:
+    max_new_token: null
+    max_length: 512
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+
+  # Override the default values in env/physical_ai_av
+  total_num_envs: 64
+  group_size: ${algorithm.group_size}
+  max_episode_steps: 64  # max episode steps for truncation (64 steps = 6.4s @ 10Hz)
+  max_steps_per_rollout_epoch: 64
+  auto_reset: True
+  ignore_terminations: False
+  
+  # Dataset configuration
+  dataset:
+    name: "physical_ai_av"
+    data_root: null  # Update to your local path or HuggingFace dataset
+    
+    # Camera configuration
+    cameras:
+      - "CAMERA_CROSS_LEFT_120FOV"
+      - "CAMERA_FRONT_WIDE_120FOV"
+      - "CAMERA_CROSS_RIGHT_120FOV"
+      - "CAMERA_FRONT_TELE_30FOV"
+    
+    # Data loading parameters
+    num_history_steps: ${actor.model.num_history_steps}
+    num_future_steps: ${actor.model.num_future_steps}
+    time_step: ${actor.model.time_step}
+    
+    # Action normalization
+    unnorm_key: "physical_ai_av"
+  
+  # Video recording for evaluation
+  video_cfg:
+    save_video: True
+    info_on_video: True
+    video_base_dir: ${runner.logger.log_path}/video
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  unnorm_key: physical_ai_av
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 32
+  global_batch_size: 256
+  seed: 42
+  enable_offload: False
+
+  # Override the default values in model/alpamayo
+  model:
+    model_path: "nvidia/Alpamayo-R1-10B"
+    model_type: "alpamayo"
+    
+    # RL-specific settings
+    add_value_head: true
+    value_after_vlm: false
+    
+    # Diffusion for trajectory sampling
+    diffusion_steps: 10
+    num_traj_samples: ${algorithm.group_size}
+
+  optim:
+    lr: 5.0e-6
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+
+  # Override the default values in training_backend/fsdp
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: True
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+  # Reward function configuration for Alpamayo-R1
+  # Rewards will be computed based on trajectory quality
+  reward_config:
+    # Trajectory smoothness reward
+    smoothness_weight: 0.3
+    # Goal proximity reward (if goal is specified)
+    goal_weight: 0.5
+    # Collision avoidance reward
+    collision_weight: 0.2
+    # Progress reward (distance covered)
+    progress_weight: 0.0
+
+critic:
+  use_critic_model: False
